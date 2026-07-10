@@ -8,12 +8,7 @@ A collection of professional Architecture Design Documents (ADD) for real-world 
 |--------|-------|
 | E-commerce Platform | Microservices, CQRS, Event-Driven |
 | WhatsApp | Scalability, Real-time Messaging |
-| Netflix | Streaming, CDN, Recommendation |
-| Uber | Real-time, Geo-spatial, Marketplace |
-| Amazon | E-commerce, AWS Cloud-Native |
-| ChatGPT | LLM Serving, RAG, AI Infrastructure |
 | LMS | Learning Management, Multi-tenancy |
-| Banking System | Transactional Integrity, Security |
 
 ## Structure
 
