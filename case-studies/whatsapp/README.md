@@ -106,15 +106,17 @@ The primary goals of the architecture are to:
 
 ## Architectural Approach
 
-The platform uses a connection-centric, service-oriented architecture. Long-lived sessions (for example WebSocket or custom binary / XMPP-like protocols) terminate at a horizontally scaled edge layer. Routing, storage, presence, media, and calling are dedicated services with clear ownership boundaries.
+The design begins with **Domain-Driven Design (DDD)** to identify bounded contexts from the business domain. Microservices are derived from those contexts—not the other way around—so that service boundaries reflect business capabilities, ubiquitous language, and invariants. This avoids premature decomposition into technical services that later fight the domain.
+
+Once contexts are clear, each resulting service follows **Clean Architecture** (Presentation → Application → Domain → Infrastructure) so domain rules stay independent of frameworks, databases, and transports. Long-lived sessions (for example WebSocket or custom binary / XMPP-like protocols) still terminate at a horizontally scaled edge layer; connection density remains a first-class runtime concern, but it is an implementation choice sitting on top of domain ownership, not a substitute for it.
 
 | Principle | Role in this Platform |
 |-----------|------------------------|
-| Domain-Driven Design (DDD) | Aligns service boundaries with messaging, media, presence, identity, and calling domains |
-| Clean Architecture | Keeps delivery and encryption rules independent of transport and storage technology |
+| Domain-Driven Design (DDD) | Identifies bounded contexts first; services are mapped from those contexts |
+| Clean Architecture | Applied inside each service so business logic does not depend on infrastructure |
 | Persistent Connection Model | Uses long-lived sessions for low-latency push to online clients |
-| Microservices / Service Orientation | Enables independent scaling of connection, chat, media, and presence workloads |
-| Event-Driven Fan-out | Decouples message write paths from group delivery, push, and analytics side effects |
+| Microservices (derived from domains) | Enables independent scaling and evolution only after domain boundaries are sound |
+| Event-Driven Integration | Contexts communicate via domain events (and anti-corruption layers where needed) |
 | CQRS (where justified) | Separates write-optimized message ingest from read/sync views for multi-device catch-up |
 | Sharding by User / Chat | Partitions state so hot users and large groups can scale independently |
 | Security by Design | Treats E2EE, key management, and minimal server-side plaintext as product requirements |
@@ -142,20 +144,21 @@ Readers should treat this as a design reference for planning, reviews, and onboa
 
 ## Scope
 
-| Domain | Responsibility Summary |
-|--------|------------------------|
-| Identity & Registration | Phone-based signup, session credentials, device linking, account lifecycle |
-| Connection Management | Persistent sessions, heartbeats, reconnect, connection affinity |
-| One-to-One Messaging | Send, store-and-forward, acknowledgments, ordering |
-| Group Messaging | Membership, fan-out, admin controls, large-group delivery |
-| Multi-Device Sync | Linked devices, catch-up queues, consistent chat views |
-| Presence & Status | Online/last-seen, typing indicators, ephemeral status |
-| Media | Encrypted upload, processing, storage references, download |
-| Push Notifications | Offline wake-up via platform push providers |
-| Voice & Video Calling | Signaling and media-path coordination (not full WebRTC stack detail) |
-| Contacts & Discovery | Address book sync, user lookup, blocking/privacy controls |
-| Business Messaging | Partner/business API ingress with rate limits and templates |
-| Administration & Abuse | Reporting, spam controls, rate limiting, operational tooling |
+Scope follows the business domains identified in Section 5. Technical capabilities such as connection management and multi-device sync sit inside or beside these domains as needed, without inventing service boundaries ahead of domain analysis.
+
+| Domain (Bounded Context) | Responsibility Summary |
+|--------------------------|------------------------|
+| Identity | Phone-based signup, authentication, sessions, device linking |
+| Contacts / User Profile | Profiles, privacy settings, contact sync, blocking, discovery |
+| Messaging (core) | Conversations, send/receive/edit/delete, receipts, offline delivery |
+| Group | Membership, admin controls, permissions, fan-out coordination |
+| Presence | Online/offline, last seen, typing and related ephemeral indicators |
+| Media | Encrypted upload, thumbnails/compression, blob references |
+| Notification | Push (APNs/FCM), retries, dead-letter handling |
+| Search | Message, group, and contact search indexes and queries |
+| Administration | Moderation, reporting, abuse controls |
+| Analytics (optional) | Insights and abuse-detection signals; not on the critical messaging path |
+| Calling (supporting) | Voice/video signaling and relay coordination (detail limited by out-of-scope rules) |
 
 ---
 
@@ -239,110 +242,213 @@ These figures are planning anchors, not SLOs. Actual sizing depends on retention
 
 # 5. Domain Analysis (DDD)
 
-## Bounded Contexts
+Domain analysis is the foundation of this architecture. Bounded contexts are identified from the business domain first; service decomposition in Sections 6–7 is derived from that model. Starting with microservices without this step tends to produce technical slices that couple unrelated business rules and slow independent evolution.
 
-| Bounded Context | Responsibility |
-|-----------------|----------------|
-| Identity | User registration, phone verification, device linking |
-| Connection | Session management, heartbeats, reconnects |
-| Messaging | One-to-one/group send, store-and-forward, acks |
-| Presence | Online status, typing, last-seen |
-| Media | Encrypted blob upload, processing, retrieval |
-| Group | Membership, admin, fan-out strategy |
-| Multi-Device | Sync, catch-up queues |
-| Calling | Signaling and relay coordination |
-| Abuse / Compliance | Reporting, spam, rate limiting |
+## Step 1: Business Domains / Bounded Contexts
 
-## Aggregates and Ubiquitous Language
+Each context owns its ubiquitous language, models, and invariants:
 
-| Aggregate | Key Concepts |
-|-----------|--------------|
-| User | Account, devices, identity keys, privacy settings |
-| Chat / Conversation | Participants, chat ID, mute/archive state |
-| Message | Message ID, ciphertext, type, timestamps, ack state |
-| Group | Membership, admins, sender-key epoch, settings |
-| Media Asset | Media ID, encrypted blob reference, size/type metadata |
+```text
+WhatsApp
+│
+├── Identity
+├── Contacts (or User Profile)
+├── Messaging (core)
+├── Group
+├── Presence
+├── Media
+├── Notification
+├── Search
+├── Administration
+└── Analytics (optional, for insights and abuse detection)
+```
 
-Services map to these domains so that changes in presence or media do not require coordinated deployments with core message routing, and so that ubiquitous language stays consistent across teams.
+| Bounded Context | Responsibility | Notes |
+|-----------------|----------------|-------|
+| Identity | Registration, phone verification, login, sessions, device linking | Auth credentials and session lifecycle |
+| Contacts / User Profile | Profiles, avatars, privacy settings, contact sync, blocking, favorites, discovery | May consolidate related user-facing profile concerns |
+| Messaging (core) | Conversations, send/receive/edit/delete/reply/forward, receipts, offline delivery | Highest write and fan-out load |
+| Group | Create groups, membership, admin controls, permissions | Membership invariants live here |
+| Presence | Online/offline, last seen, typing, voice-recording indicators | Separated due to high-frequency ephemeral updates |
+| Media | Upload, thumbnails, compression; metadata vs blob ownership | Blobs in object storage; metadata in context store |
+| Notification | Push (APNs/FCM), email/SMS where used, retries, DLQs | Reacts to domain events from Messaging/Presence |
+| Search | Message, group, and contact search | Eventually consistent indexes from domain events |
+| Administration | Moderation, reporting, abuse controls | Cross-cutting policies without owning message plaintext |
+| Analytics (optional) | Insights and abuse-detection signals | Off the critical delivery path |
+
+Connection management (heartbeats, reconnect, session affinity) is a platform/edge concern that supports these domains; it is not a substitute business domain. Multi-device sync is modeled primarily inside Messaging (catch-up queues) with Identity owning device linking.
+
+## Messaging Context: Aggregates, Entities, Value Objects, and Events
+
+| Kind | Examples |
+|------|----------|
+| Aggregate root | `Conversation` |
+| Entities | `Message`, `Attachment`, `Reaction` |
+| Value objects | `MessageContent` (ciphertext envelope), `MessageStatus`, `MessageType` |
+| Domain events | `MessageSent`, `MessageDelivered`, `MessageRead`, `MessageDeleted`, `MessageEdited` |
+
+Similar modeling applies elsewhere—for example a `Group` aggregate with membership invariants, or Presence with ephemeral status updates that intentionally avoid strong consistency with Messaging.
+
+Contexts integrate through **domain events** or **anti-corruption layers** when models differ (for example Notification consuming `MessageSent` without importing Messaging’s full aggregate graph).
 
 ```mermaid
-flowchart TB
-  Identity --> Connection
-  Connection --> Messaging
-  Messaging --> Group
-  Messaging --> MultiDevice
-  Messaging --> Media
-  Connection --> Presence
-  Messaging --> Calling
-  Identity --> Abuse
-  Messaging --> Abuse
+flowchart LR
+  Identity --- Contacts
+  Contacts --- Messaging
+  Messaging --- Group
+  Messaging --- Media
+  Messaging --- Presence
+  Messaging --- Notification
+  Messaging --- Search
+  Group --- Notification
+  Administration --- Messaging
+  Analytics --- Messaging
 ```
+
+This DDD foundation keeps technical decomposition aligned with business capabilities before any microservice map is drawn.
 
 ---
 
 # 6. High-Level Architecture
 
-Clients connect via persistent sessions (WebSocket or custom protocol) to edge/gateway servers. Messages route through messaging services, with fan-out via queues (for example Kafka). Offline messages are stored and delivered on reconnect. Media uses object storage plus CDN. Presence and session maps use caching (Redis). E2EE is implemented with the Signal Protocol family.
+## Step 2: Mapping Bounded Contexts to Microservices
+
+Bounded contexts map to independently deployable services. Some related contexts may be consolidated for simplicity and performance (for example closely related user/profile concerns), but consolidation is an explicit trade-off—not the default starting point. An **API Gateway** (plus connection edge for persistent sessions) fronts the system for routing, authentication, and rate limiting.
+
+```text
+                         API Gateway / Connection Edge
+                                      │
+        ┌─────────────────────────────┼─────────────────────────────┐
+        │                             │                             │
+ Identity Service              User Service                 Contact Service
+        │                             │                             │
+        └─────────────────────────────┼─────────────────────────────┘
+                                      │
+                         Messaging Service (Core)
+                                      │
+                    ┌─────────────────┼─────────────────┐
+                    │                                   │
+              Group Service                      Presence Service
+                    │                                   │
+              Media Service                   Notification Service
+                    │                                   │
+              Search Service              File Storage (supports Media)
+                    │
+            Administration Service
+```
+
+Clients still use persistent sessions (WebSocket or custom protocol) to the connection edge. Messages route through the Messaging service; fan-out and side effects travel on events (Kafka/RabbitMQ). Offline messages are stored and delivered on reconnect. Media uses object storage plus CDN. Presence and session maps use caching (Redis). E2EE uses the Signal Protocol family.
+
+### Service Responsibilities (Aligned to Domains)
+
+| Service | Derived From | Responsibility |
+|---------|--------------|----------------|
+| Identity Service | Identity | Authentication, registration, login, JWT/refresh tokens, MFA, sessions, device linking |
+| User Service | Contacts / User Profile | Profiles, avatars, privacy settings, status text |
+| Contact Service | Contacts | Contact sync, blocking, favorites, discovery |
+| Messaging Service | Messaging | Send/receive/edit/delete/reply/forward, read receipts, delivery status, offline queues |
+| Group Service | Group | Create/add/remove members, admin controls, permissions |
+| Presence Service | Presence | Online/offline, last seen, typing, recording indicators |
+| Media Service | Media | Upload, thumbnails, compression; metadata in DB; blobs via File Storage |
+| File Storage Service | Media (infra) | Object storage (S3-like) supporting Media |
+| Notification Service | Notification | Push (APNs/FCM), retries, dead-letter queues |
+| Search Service | Search | Message/group/contact search indexes and queries |
+| Administration Service | Administration | Moderation, reporting, abuse controls |
+
+Cross-service communication prefers **events** for loose coupling (for example `MessageSent` → Notification and Search). Synchronous calls are reserved for requests that must complete on the user-facing path and cannot tolerate eventual consistency.
 
 ### Typical Message Flow
 
-**Sender → Edge → Message Service (store + queue) → Recipient Edge (push or store) → Ack back to sender**
+**Sender → Edge → Messaging Service (store + enqueue) → Recipient Edge (push or store) → Ack back to sender**
 
 ```mermaid
 sequenceDiagram
   participant S as Sender Client
   participant SE as Sender Edge
-  participant MS as Message Service
-  participant Q as Fan-out Queue
+  participant MS as Messaging Service
+  participant Q as Event Bus
+  participant NS as Notification Service
   participant RE as Recipient Edge
   participant R as Recipient Client
 
   S->>SE: Encrypted message frame
   SE->>MS: Authenticated route + persist
-  MS->>MS: Store ciphertext / metadata
-  MS->>Q: Enqueue delivery work
+  MS->>MS: Conversation aggregate: apply MessageSent
+  MS->>Q: Publish MessageSent / delivery work
   Q->>RE: Deliver to recipient session
+  Q->>NS: Trigger push if offline
   alt Recipient online
     RE->>R: Push message frame
     R->>RE: Delivered ack
   else Recipient offline
-    MS->>MS: Retain for catch-up + trigger push
+    MS->>MS: Retain for catch-up
   end
-  RE->>MS: Ack status
-  MS->>SE: Update sender (delivered)
+  RE->>MS: Ack status → MessageDelivered
+  MS->>SE: Update sender
   SE->>S: Ack notification
 ```
 
 | Layer | Responsibility |
 |-------|----------------|
 | Clients | E2EE, UI, local store, reconnect/catch-up |
-| Edge / Gateway | TLS, auth, session affinity, frame routing |
-| Messaging Core | Persist, route, ack state, offline queues |
-| Fan-out / Events | Group delivery, push triggers, side effects |
-| Data & Cache | Message stores, session maps, presence |
-| Media Plane | Encrypted blob storage and CDN delivery |
+| API Gateway / Connection Edge | TLS, auth, routing, rate limits, session affinity |
+| Domain services | Own aggregates, invariants, and domain events per context |
+| Event bus | Fan-out, push triggers, search indexing, analytics |
+| Data & cache | Per-service stores; Redis for sessions/presence |
+| File storage / CDN | Encrypted media blobs |
 
 ---
 
 # 7. Core Components & Services
 
-| Service | Responsibility |
-|---------|----------------|
-| Connection / Edge Layer | WebSocket or XMPP-like gateways; terminate connections; auth/TLS; heartbeat |
-| Message Service | Routing, storage, delivery, acknowledgment state |
-| Presence Service | Online/last-seen/typing status tracking |
-| Media / Asset Service | Upload, optional dedup of ciphertext blobs, CDN serving |
-| Group Service | Membership, admin rules, fan-out coordination |
-| Push Service | Integration with APNs/FCM and regional providers |
-| Auth / Identity Service | Registration, verification, session credentials, device linking |
-| Multi-Device Sync Service | Catch-up queues and linked-device delivery |
+Services listed in Section 6 are the runtime components. Each microservice internally follows Clean Architecture so domain rules do not depend on controllers, ORMs, or brokers.
+
+## Clean Architecture Inside a Service (Messaging Example)
+
+```text
+Messaging Service
+│
+├── Presentation (API / Controllers / WebSocket handlers)
+│
+├── Application
+│   ├── Commands (e.g., SendMessageCommand)
+│   ├── Queries
+│   ├── DTOs
+│   └── Validators
+│
+├── Domain
+│   ├── Entities / Aggregates (Conversation, Message)
+│   ├── Value Objects
+│   ├── Domain Events
+│   └── Interfaces (repositories, domain services)
+│
+├── Infrastructure
+│   ├── Persistence (EF Core, Cassandra client, Redis, etc.)
+│   ├── Messaging (Kafka / RabbitMQ)
+│   ├── Repository implementations
+│   └── External integrations
+│
+└── Tests (unit / integration)
+```
+
+| Layer | Dependency Rule |
+|-------|-----------------|
+| Domain | No dependencies on Application, Presentation, or Infrastructure |
+| Application | Orchestrates use cases; depends only on Domain abstractions |
+| Infrastructure | Implements Domain/Application ports (persistence, bus, push adapters) |
+| Presentation | Translates HTTP/WebSocket frames into commands/queries |
+
+The same layering applies to Identity, Group, Presence, Media, and other services. Framework choices (EF Core vs another ORM, Kafka vs RabbitMQ) stay in Infrastructure and can change without rewriting Conversation or Group invariants.
 
 ### Design Notes
 
-- **Connection layer** optimizes for connection density and cheap heartbeats; it should remain thin and avoid heavy business logic.
-- **Message service** owns delivery guarantees and ack transitions; it must remain available even if media or calling is degraded.
-- **Group service** owns membership consistency; fan-out workers consume membership snapshots or incremental membership events.
-- **Push service** sends privacy-conscious payloads (often opaque) sufficient to wake the client for catch-up.
+- **Do not start with microservices** — derive them from bounded contexts; consolidate only with an explicit reason (team size, latency, transactional needs).
+- **Connection edge** stays thin: auth, heartbeats, routing—not Conversation invariants.
+- **Messaging Service** owns delivery guarantees and ack state transitions; it must remain available if Media, Search, or Calling degrade.
+- **Group Service** owns membership consistency; Messaging and fan-out workers consume membership snapshots or membership events.
+- **Presence Service** is separate because update frequency and consistency needs differ from durable Messaging.
+- **Notification Service** is event-driven; payloads stay privacy-conscious (often opaque wake-ups).
+- **Search / Analytics** consume events asynchronously and must not sit on the critical send path.
 
 ---
 
@@ -528,6 +634,7 @@ Trace IDs should survive ack paths so “sent but never delivered” investigati
 
 | Decision | Choice | Trade-off |
 |----------|--------|-----------|
+| Domains before microservices | Derive services from bounded contexts; consolidate only deliberately | More upfront modeling; fewer accidental service boundaries later |
 | Consistency vs availability | Favor availability; eventual consistency for presence/read receipts | Simpler global operation; receipts may lag briefly |
 | Stateful connections | Required for low-latency push | Needs careful session maps, sticky routing, and reconnect design |
 | SQL vs NoSQL | Relational for metadata; wide-column for messages | Operational complexity of two storage models; better fit per workload |
@@ -536,6 +643,7 @@ Trace IDs should survive ack paths so “sent but never delivered” investigati
 
 ### Alternatives Considered
 
+- **Start with a microservice template per technical layer** — Faster to sketch boxes; tends to couple unrelated business rules and force distributed transactions across contexts.
 - **Pure request/response polling** — Simpler ops, unacceptable latency and battery/network cost at this scale.
 - **Single shared SQL store for all messages** — Stronger ad-hoc queryability, poor write scalability and hotspot behavior.
 - **Server-side searchable plaintext** — Enables features, incompatible with E2EE product requirements.
@@ -556,4 +664,4 @@ Each improvement should be evaluated against E2EE constraints, connection-plane 
 
 # 19. Conclusion
 
-This architecture delivers a reliable, private, and scalable messaging platform for internet-scale demand by combining persistent connections, decoupled services, efficient storage, and strong security primitives. It balances user experience with operational feasibility and serves as a practical reference for similar real-time systems—favoring availability, ciphertext-first design, and independent scale of connection, messaging, media, and calling planes.
+This architecture delivers a reliable, private, and scalable messaging platform for internet-scale demand by starting from Domain-Driven Design—identifying bounded contexts and aggregates before mapping them to services—and applying Clean Architecture inside each service. Persistent connections, event-driven integration, efficient storage, and E2EE sit on that foundation. The result balances user experience with operational feasibility and remains a practical reference for similar real-time systems: domains first, microservices second, availability and ciphertext-first design throughout.
