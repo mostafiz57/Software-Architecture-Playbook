@@ -25,8 +25,8 @@ This repository aims to:
 
 | System                                  | Primary Focus                                                           |
 | --------------------------------------- | ----------------------------------------------------------------------- |
-| 🛒 **E-commerce Platform**              | Clean Architecture, DDD, Microservices, CQRS, Event-Driven Architecture |
-| 💬 **WhatsApp**                         | Real-Time Messaging, WebSockets, Scalability, Distributed Systems       |
+| 🛒 **[E-commerce Platform](case-studies/e-commerce-platform/README.md)** | Clean Architecture, DDD, Microservices, CQRS, Event-Driven Architecture |
+| 💬 **[WhatsApp](case-studies/whatsapp/README.md)** | Real-Time Messaging, WebSockets, Scalability, Distributed Systems       |
 | 🎓 **Learning Management System (LMS)** | Multi-Tenancy, SaaS Architecture, Role-Based Access Control             |
 
 More case studies will be added over time.
