@@ -33,16 +33,6 @@ More case studies will be added over time.
 
 ---
 
-# 📘 Architecture Guides
-
-Practical playbooks for common engineering challenges beyond individual system designs.
-
-| Guide | Primary Focus |
-| ----- | ------------- |
-| 🔧 **[Modernizing Legacy Systems](guides/modernizing-legacy-systems/README.md)** | Incremental refactoring, characterization tests, Strangler Fig, safe deployment |
-
----
-
 # 🏛️ Architecture Design Document (ADD)
 
 Every case study follows the same Architecture Design Document (ADD) structure.
@@ -124,10 +114,6 @@ Software-Architecture-Playbook
 │   │   └── README.md
 │   │
 │   └── learning-management-system
-│       └── README.md
-│
-├── guides
-│   └── modernizing-legacy-systems
 │       └── README.md
 │
 ├── assets
