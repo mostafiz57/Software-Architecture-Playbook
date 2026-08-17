@@ -205,7 +205,7 @@ flowchart TB
 | Edge and ingestion | API Gateway, WebSocket Gateway | Validate JWT, route REST, keep driver WebSocket sessions |
 | Shared platform | **Auth / Identity**, Location, Matching, Pricing and Payment, Notification | Register and verify every user type, issue JWT, driver spatial index, dispatch, pay |
 | Product domains | Mobility, Delivery | Product rules: passenger trips vs packages with proof of delivery |
-| Data and messaging | PostgreSQL, Redis, RabbitMQ or Kafka | Postgres = system of record. Redis = hot supply and sessions. Broker = async events |
+| Data and messaging | PostgreSQL, Redis, RabbitMQ (Kafka later) | Postgres = system of record. Redis = hot supply. RabbitMQ = async events at launch |
 
 No product API runs until Auth has issued a JWT and the gateway has checked it. REST is for requests the user is waiting on. WebSockets are for GPS and live tracking. The broker is for work that can wait (OTP send, push, receipts, payment capture).
 
@@ -516,43 +516,107 @@ flowchart TB
 
 ## How it is deployed at launch
 
-One region. A few services. Not thirty microservices.
+**Stage 1 target: 5K users, headroom to 50K. Keep the bill small.** One region. One backend. One database. No Kafka, no Redis cluster, no Kubernetes farm.
 
 ```mermaid
 flowchart TB
-  LB["Load Balancer"] --> REST["API Gateway"]
-  LB --> WS["WebSocket Gateway"]
-  REST --> Auth["Auth Identity"]
-  REST --> Mob["Mobility"]
-  REST --> Del["Delivery"]
-  REST --> Plat["Platform modules"]
-  WS --> Auth
-  WS --> Plat
+  subgraph Cheap["Stage 1 low cost"]
+    LB["Load Balancer"] --> App["One backend two instances"]
+    App --> PG["One PostgreSQL"]
+    App --> Redis["One Redis"]
+    App --> MQ["One RabbitMQ"]
+  end
+```
+
+Inside that one backend the modules stay separate in code (Auth, Mobility, Delivery, Location, Matching, Pricing, Payment, Notification). They are **not** separate clusters at launch.
+
+```mermaid
+flowchart TB
+  LB["Load Balancer"] --> App["API plus WebSocket"]
+  subgraph AppBox["Single deployable"]
+    Auth["Auth Identity"]
+    Mob["Mobility"]
+    Del["Delivery"]
+    Plat["Location Matching Pricing Notify"]
+  end
+  App --> Auth
+  App --> Mob
+  App --> Del
+  App --> Plat
   Auth --> PG["PostgreSQL"]
   Mob --> PG
   Del --> PG
   Plat --> PG
-  Auth --> Redis["Redis"]
-  Plat --> Redis
-  Auth --> MQ["Message Broker"]
-  Mob --> MQ
-  Del --> MQ
-  Plat --> MQ
+  Plat --> Redis["Redis"]
+  Auth --> Redis
+  Plat --> MQ["RabbitMQ"]
 ```
 
-| Stage | When | Shape |
-|-------|------|--------|
-| 1. Launch | First city | One region, one primary Postgres, Redis, broker, several API instances |
-| 2. Growth | Traffic rises | More API nodes, read replicas, workers, rate limits, better dashboards |
-| 3. Large scale | Many cities | Regional routing, regional data and matching, sharding, failover |
+| Stage | Users | Cost shape |
+|-------|-------|------------|
+| 1. Launch | **5K to 50K** | 2 app instances, 1 Postgres, 1 Redis, 1 RabbitMQ, pay-as-you-go maps/SMS/payments |
+| 2. Growth | past 50K toward hundreds of thousands | Split hot services, Redis cluster, Postgres replicas, more gateways |
+| 3. Large scale | millions | Regional routing, regional data and matching, sharding |
 
-Stage 1 is the default in this document. Later sections say what changes at Stage 2 and 3 — not a rewrite of Trip or Delivery.
+**Do not buy at Stage 1:** Kafka, Redis Cluster, Kubernetes multi-AZ microservices, read replicas, multi-region, extra matching workers. Split only when 50K concurrent load actually hurts.
+
+---
+
+## How many users at a time?
+
+Stage 1 is **5K–50K users**, not millions. Millions of accounts come later without changing Trip or Delivery.
+
+```mermaid
+flowchart LR
+  S["Start 5K users"] --> M["Stage 1 max 50K"]
+  M --> G["Stage 2 grow"]
+  G --> Mega["Stage 3 millions"]
+```
+
+| Metric | Stage 1 — minimise cost | Stage 2 | Stage 3 |
+|--------|-------------------------|---------|---------|
+| Users on the platform | **5K start, design for 50K** | 50K to ~500K | millions |
+| Concurrent (apps open) | about 500 to 5K | tens of thousands | millions, by region |
+| Online drivers GPS | about 200 to 2K | tens of thousands | 100k+ per region |
+| Peak new jobs | tens to a few hundred per minute | thousands per minute | tens of thousands per minute per region |
+
+Example: launch with **5K** registered users. Rush hour might be **500–1K** apps open and **200–400** drivers online. At **50K** users, maybe **3K–5K** concurrent. That still fits one Postgres and one Redis.
+
+What we skip to keep cost down:
+
+| Spend later | Why not now |
+|-------------|-------------|
+| Kafka | RabbitMQ is enough for OTP, push, receipts |
+| Redis Cluster | One Redis holds 50K users of GPS and locks |
+| Many microservices | Extra load balancers and idle VMs with no traffic |
+| Postgres replicas | One primary handles 50K-user writes |
+| Multi-region | One city does not need it |
+
+What breaks first **after** 50K (then spend):
+
+| Bottleneck | Why |
+|------------|-----|
+| WebSocket instances | More online drivers pinging every 4–5 seconds |
+| Redis memory / CPU | Spatial index and offer locks |
+| Postgres connections | Auth, trips, payments |
+| Single-region | Second city in another timezone |
+
+Path:
+
+```mermaid
+flowchart TB
+  S1["Stage 1: 5K to 50K cheap stack"] --> S2["Stage 2: split and replicate"]
+  S2 --> S3["Stage 3: regions for millions"]
+```
+
+Section 11 will detail the later spend. The domain (Trip, Delivery, Auth roles) does not change.
 
 ---
 
 ## Goals
 
 - Ship rides **and** courier in one region, as a real production system
+- Start at **5K users**, stay cheap through **50K** (one backend, one Postgres, one Redis, RabbitMQ)
 - One **Auth / Identity** platform for passenger, sender, driver, courier, and operations
 - Reuse location, matching, pricing, payment, and notification
 - Keep Trip and Delivery rules separate
