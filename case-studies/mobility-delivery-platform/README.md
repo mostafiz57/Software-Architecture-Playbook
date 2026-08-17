@@ -2,7 +2,7 @@
 
 **Architecture Design Document (ADD)**
 
-A simple, production architecture for **rides** and **package delivery** on one platform. Shared location, matching, pricing, payment, and notifications. Separate trip and delivery rules.
+A simple, production architecture for **rides** and **package delivery** on one platform. Shared **auth**, location, matching, pricing, payment, and notifications. Separate trip and delivery rules.
 
 Reference product: **MobilityFlow**.
 
@@ -40,11 +40,11 @@ MobilityFlow is a two-sided marketplace:
 
 - **Mobility** — passenger ride-hailing
 - **Delivery** — package courier
-- **Shared platform** — identity, location, matching, pricing, payment, notification
+- **Shared platform** — **auth (all user types)**, location, matching, pricing, payment, notification
 
 Ride-hailing is the core MVP. Courier is in the same MVP because both products use the same drivers and the same dispatch pipeline. We are **not** building food delivery, grocery, freight, or the rest of the Uber catalog.
 
-**One sentence:** share the pipes (location, matching, pay); keep the products (Trip vs Delivery) separate.
+**One sentence:** one auth for every user; share location, matching, and pay; keep Trip and Delivery separate.
 
 ```mermaid
 flowchart LR
@@ -54,6 +54,7 @@ flowchart LR
   end
 
   subgraph Platform["Shared Platform"]
+    Auth["Auth Identity"]
     Loc["Location"]
     Match["Matching"]
     Price["Pricing"]
@@ -62,12 +63,21 @@ flowchart LR
   end
 
   subgraph Supply
-    Driver["Driver Courier"]
+    Driver["Driver"]
+    Courier["Courier"]
+    Ops["Operations"]
   end
 
+  Passenger --> Auth
+  Sender --> Auth
+  Driver --> Auth
+  Courier --> Auth
+  Ops --> Auth
+  Auth --> Match
   Passenger --> Match
   Sender --> Match
   Match --> Driver
+  Match --> Courier
   Loc --> Match
   Price --> Match
   Match --> Pay
@@ -89,11 +99,12 @@ flowchart TB
   end
 
   subgraph Edge["Edge"]
-    REST["API Gateway"]
-    WS["WebSocket Gateway"]
+    REST["API Gateway JWT"]
+    WS["WebSocket Gateway JWT"]
   end
 
   subgraph Core["MobilityFlow"]
+    Auth["Auth Identity"]
     Mobility["Mobility Domain"]
     DeliveryDom["Delivery Domain"]
     Shared["Shared Platform"]
@@ -103,7 +114,7 @@ flowchart TB
     Maps["Maps"]
     Pay["Payment Provider"]
     Push["Push SMS Email"]
-    Verify["Driver Verification"]
+    KYC["Verification Vendor"]
   end
 
   CApp --> REST
@@ -111,26 +122,30 @@ flowchart TB
   DApp --> REST
   DApp --> WS
   Ops --> REST
+  REST --> Auth
   REST --> Mobility
   REST --> DeliveryDom
   REST --> Shared
+  WS --> Auth
   WS --> Shared
+  Auth --> KYC
   Mobility --> Shared
   DeliveryDom --> Shared
   Shared --> Maps
   Shared --> Pay
   Shared --> Push
-  Shared --> Verify
 ```
 
 | Who | Talks to the platform to |
 |-----|--------------------------|
-| Consumer App | Request a ride or delivery, track, pay, rate |
-| Driver / Courier App | Go online, stream GPS, accept offers, complete jobs |
-| Operations | Disputes, safety, driver verification exceptions |
+| Consumer App | Register, verify phone, request a ride or delivery, track, pay, rate |
+| Driver / Courier App | Register, complete driver verification, go online, stream GPS, accept offers |
+| Operations | Register or invite, disputes, safety, approval exceptions |
+| Auth / Identity | Signup, OTP, login, JWT, roles, driver KYC status |
 | Maps | Distance, ETA, routes |
 | Payment Provider | Authorize and capture (we never store raw cards) |
-| Push / SMS / Email | Offers, status, receipts |
+| Push / SMS / Email | OTP, offers, status, receipts |
+| Verification Vendor | License, background check, vehicle check for drivers |
 
 ---
 
@@ -146,6 +161,7 @@ flowchart TB
   end
 
   subgraph L2["2. Shared Platform"]
+    Auth["Auth Identity"]
     Loc["Location Service"]
     ME["Matching Engine"]
     PP["Pricing and Payment"]
@@ -163,6 +179,9 @@ flowchart TB
     MQ["Message Broker"]
   end
 
+  GW --> Auth
+  WSG --> Auth
+  Auth --> GW
   GW --> Mob
   GW --> Del
   GW --> PP
@@ -170,10 +189,12 @@ flowchart TB
   Loc --> ME
   ME --> Mob
   ME --> Del
+  Auth --> PG
   Mob --> PG
   Del --> PG
   Loc --> RD
   ME --> RD
+  Auth --> MQ
   Mob --> MQ
   Del --> MQ
   MQ --> Ntf
@@ -181,12 +202,12 @@ flowchart TB
 
 | Layer | Components | What it does |
 |-------|------------|----------------|
-| Edge and ingestion | API Gateway, WebSocket Gateway | JWT auth, REST routing, persistent driver telemetry |
-| Shared platform | Location, Matching, Pricing and Payment, Notification | Driver spatial index in Redis H3, policy-based dispatch, payment orchestration |
+| Edge and ingestion | API Gateway, WebSocket Gateway | Validate JWT, route REST, keep driver WebSocket sessions |
+| Shared platform | **Auth / Identity**, Location, Matching, Pricing and Payment, Notification | Register and verify every user type, issue JWT, driver spatial index, dispatch, pay |
 | Product domains | Mobility, Delivery | Product rules: passenger trips vs packages with proof of delivery |
-| Data and messaging | PostgreSQL, Redis, RabbitMQ or Kafka | Postgres = system of record. Redis = hot supply. Broker = async events |
+| Data and messaging | PostgreSQL, Redis, RabbitMQ or Kafka | Postgres = system of record. Redis = hot supply and sessions. Broker = async events |
 
-REST is for requests the user is waiting on (quote, request, accept). WebSockets are for GPS and live tracking. The broker is for work that can wait (push, receipts, payment capture).
+No product API runs until Auth has issued a JWT and the gateway has checked it. REST is for requests the user is waiting on. WebSockets are for GPS and live tracking. The broker is for work that can wait (OTP send, push, receipts, payment capture).
 
 ---
 
@@ -194,45 +215,141 @@ REST is for requests the user is waiting on (quote, request, accept). WebSockets
 
 ```mermaid
 flowchart TB
+  subgraph SharedMVP["Shared Platform"]
+    S0["Auth Identity"]
+    S1["Registration all user types"]
+    S2["Verification OTP and driver KYC"]
+    S3["Login JWT roles"]
+    S4["Location index"]
+    S5["Matching engine"]
+    S6["Pricing and payment"]
+    S7["Notification"]
+  end
+
   subgraph MobilityMVP["Mobility"]
-    M1["Passenger and driver registration"]
-    M2["Driver verification and vehicle"]
-    M3["Availability and live location"]
-    M4["Ride request and matching"]
-    M5["Trip, fare, payment, rating"]
+    M1["Ride request and matching"]
+    M2["Trip lifecycle"]
+    M3["Fare payment rating"]
   end
 
   subgraph DeliveryMVP["Delivery"]
-    D1["Customer, sender, recipient"]
-    D2["Package, pickup, destination"]
-    D3["Delivery request and matching"]
-    D4["Pickup confirm and live tracking"]
-    D5["Fee, payment, proof of delivery"]
+    D1["Package pickup destination"]
+    D2["Delivery request and matching"]
+    D3["Tracking proof of delivery"]
   end
 
-  subgraph SharedMVP["Shared"]
-    S1["Identity"]
-    S2["Location index"]
-    S3["Matching engine"]
-    S4["Pricing and payment"]
-    S5["Notification"]
-  end
-
-  MobilityMVP --- SharedMVP
-  DeliveryMVP --- SharedMVP
+  S0 --> S1
+  S1 --> S2
+  S2 --> S3
+  SharedMVP --- MobilityMVP
+  SharedMVP --- DeliveryMVP
 ```
 
 Not in MVP: food delivery, grocery, freight, transit, shared rides, scheduled rides, multi-region active-active.
 
 ---
 
-## How a job actually runs
+## Auth platform — every user type
 
-Three pipelines. Same for rides and deliveries. Only the last step (completion) differs.
+Registration and verification live on the **Shared Platform**, not inside Mobility or Delivery. One Identity service. Many roles.
+
+```mermaid
+flowchart TB
+  subgraph Users["All user types"]
+    P["Passenger"]
+    S["Sender"]
+    D["Driver"]
+    C["Courier"]
+    O["Operations"]
+  end
+
+  subgraph AuthPlat["Shared Auth Identity"]
+    Reg["Register"]
+    Ver["Verify"]
+    Login["Login"]
+    JWT["Issue JWT"]
+    Roles["Assign roles"]
+  end
+
+  P --> Reg
+  S --> Reg
+  D --> Reg
+  C --> Reg
+  O --> Reg
+  Reg --> Ver
+  Ver --> Login
+  Login --> JWT
+  JWT --> Roles
+```
+
+| User type | App | Registration | Verification before they can act |
+|-----------|-----|--------------|----------------------------------|
+| Passenger | Consumer App | Phone, name, payment method token | Phone OTP |
+| Sender | Consumer App | Same account can add sender profile | Phone OTP |
+| Driver | Driver App | Phone, name, license, vehicle | Phone OTP + license + background + vehicle check |
+| Courier | Driver App | Same driver account; courier capability | Same as driver; vehicle must match parcel rules |
+| Operations | Admin | Invite by existing admin | Email or SSO + MFA |
+
+Same person can hold more than one role (passenger and sender is normal; driver and courier is normal). Auth stores **one user**, many **roles**. Product domains only see “is this token allowed to request a ride / go online / approve KYC?”
+
+```mermaid
+sequenceDiagram
+  participant App as Any App
+  participant GW as API Gateway
+  participant Auth as Auth Identity
+  participant SMS as SMS Email
+  participant KYC as Verification Vendor
+  participant DB as PostgreSQL
+
+  App->>GW: Register phone and role
+  GW->>Auth: Create user
+  Auth->>DB: Save user pending verify
+  Auth->>SMS: Send OTP
+  App->>GW: Submit OTP
+  GW->>Auth: Confirm OTP
+  alt Driver or Courier
+    Auth->>KYC: License background vehicle
+    KYC-->>Auth: Approved or rejected
+    Auth->>DB: Save KYC status
+  end
+  Auth->>DB: Mark verified
+  App->>GW: Login
+  GW->>Auth: Check credentials
+  Auth-->>App: JWT with roles
+```
+
+After login, every call is the same:
 
 ```mermaid
 flowchart LR
-  P1["1. Location stream"] --> P2["2. Matching"]
+  App["Any App"] --> GW["Gateway"]
+  GW --> Auth["Validate JWT"]
+  Auth --> Role{"Role on token"}
+  Role -->|"Passenger Sender"| Product["Mobility or Delivery APIs"]
+  Role -->|"Driver Courier"| Supply["Go online GPS offers"]
+  Role -->|"Operations"| Admin["Admin APIs"]
+```
+
+| Auth state | Meaning |
+|------------|---------|
+| Registered | Account exists, OTP not done |
+| Verified | Consumer may request rides or deliveries |
+| KYC pending | Driver or courier cannot go online yet |
+| KYC approved | Driver or courier may go online and receive offers |
+| Suspended | Token rejected at the gateway |
+
+Drivers are **not** verified inside the Mobility domain. Mobility and Delivery only check: this JWT is a driver, and Auth says KYC is approved.
+
+---
+
+## How a job actually runs
+
+Auth first. Then three pipelines. Same for rides and deliveries. Only completion differs.
+
+```mermaid
+flowchart LR
+  P0["0. Register verify login"] --> P1["1. Location stream"]
+  P1 --> P2["2. Matching"]
   P2 --> P3["3. Track and complete"]
 ```
 
@@ -384,13 +501,14 @@ flowchart LR
 
 ```mermaid
 flowchart TB
+  R0["One Auth for every user type"]
   R1["Share location and matching"]
   R2["Keep Trip and Delivery separate"]
   R3["GPS in Redis, facts in Postgres"]
   R4["Slow work on the broker"]
 ```
 
-1. **Share the kernel, isolate the records.** One location index and one matching pipeline. No single `Job` table that mixes passenger safety rules with parcel proof of delivery.
+1. **Share the kernel, isolate the records.** One Auth, one location index, one matching pipeline. No signup inside Mobility or Delivery. No single `Job` table that mixes passenger rules with proof of delivery.
 2. **Offload telemetry.** GPS stays in Redis. Write to Postgres on job completion (and optional later snapshots).
 3. **Async the side effects.** Push, receipts, and payment capture run on workers so the state transition stays fast.
 
@@ -404,15 +522,20 @@ One region. A few services. Not thirty microservices.
 flowchart TB
   LB["Load Balancer"] --> REST["API Gateway"]
   LB --> WS["WebSocket Gateway"]
+  REST --> Auth["Auth Identity"]
   REST --> Mob["Mobility"]
   REST --> Del["Delivery"]
   REST --> Plat["Platform modules"]
+  WS --> Auth
   WS --> Plat
-  Mob --> PG["PostgreSQL"]
+  Auth --> PG["PostgreSQL"]
+  Mob --> PG
   Del --> PG
   Plat --> PG
-  Plat --> Redis["Redis"]
-  Mob --> MQ["Message Broker"]
+  Auth --> Redis["Redis"]
+  Plat --> Redis
+  Auth --> MQ["Message Broker"]
+  Mob --> MQ
   Del --> MQ
   Plat --> MQ
 ```
@@ -430,6 +553,7 @@ Stage 1 is the default in this document. Later sections say what changes at Stag
 ## Goals
 
 - Ship rides **and** courier in one region, as a real production system
+- One **Auth / Identity** platform for passenger, sender, driver, courier, and operations
 - Reuse location, matching, pricing, payment, and notification
 - Keep Trip and Delivery rules separate
 - Match nearby eligible drivers quickly
@@ -450,14 +574,14 @@ Software engineers, tech leads, architects, and engineering managers on this tea
 
 | Area | Owns |
 |------|------|
-| Identity | Signup, login, roles (passenger, sender, driver, ops) |
+| Auth / Identity | Register, OTP, login, JWT, roles for passenger, sender, driver, courier, ops; driver KYC |
 | Location | Driver GPS index, pickup and drop points |
 | Matching | Nearby supply, offers, locks, re-match |
 | Pricing | Ride fare and delivery fee |
 | Payment | Authorize, capture, refund via the provider |
 | Notification | Push, SMS, email from domain events |
-| Mobility | Passenger, vehicle for rides, Ride request, Trip, rating |
-| Delivery | Sender, recipient, package, Delivery, proof of delivery, rating |
+| Mobility | Ride request, Trip, fare, rating (no user signup here) |
+| Delivery | Package, Delivery, proof of delivery, rating (no user signup here) |
 
 ---
 
