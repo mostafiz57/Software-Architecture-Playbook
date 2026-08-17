@@ -27,7 +27,7 @@ This repository aims to:
 | --------------------------------------- | ----------------------------------------------------------------------- |
 | 🛒 **[E-commerce Platform](case-studies/e-commerce-platform/README.md)** | Clean Architecture, DDD, Microservices, CQRS, Event-Driven Architecture |
 | 💬 **[WhatsApp](case-studies/whatsapp/README.md)** | Real-Time Messaging, WebSockets, Scalability, Distributed Systems       |
-| 🚗 **[RideFlow](case-studies/rideflow/README.md)** | Real-Time Marketplace, Geo-Spatial Matching, Evolutionary Scalability |
+| 🚗 **[Mobility & Delivery Platform](case-studies/mobility-delivery-platform/README.md)** | Multi-Product Marketplace, Geo-Spatial Matching, Shared Platform Services |
 | 🎓 **Learning Management System (LMS)** | Multi-Tenancy, SaaS Architecture, Role-Based Access Control             |
 
 More case studies will be added over time.
@@ -112,6 +112,9 @@ Software-Architecture-Playbook
 │   │   └── README.md
 │   │
 │   ├── whatsapp
+│   │   └── README.md
+│   │
+│   ├── mobility-delivery-platform
 │   │   └── README.md
 │   │
 │   └── learning-management-system
