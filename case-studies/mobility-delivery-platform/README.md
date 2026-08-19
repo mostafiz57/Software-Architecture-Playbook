@@ -1,50 +1,45 @@
+---
+title: "Mobility & Delivery Platform — Enterprise Architecture (ADD)"
+description: "Production-ready architecture for rides and package delivery on a unified platform. Shared Auth, Location, Matching, Pricing, Payment, and Notifications with isolated Trip and Delivery domains."
+keywords: [mobility platform, delivery platform, ride-hailing architecture, courier architecture, microservices, DDD, Redis H3, WebSocket, RabbitMQ, MobilityFlow]
+robots: index, follow
+---
+
 # Mobility & Delivery Platform — Enterprise Architecture
 
 **Architecture Design Document (ADD)**
 
-A simple, production architecture for **rides** and **package delivery** on one platform. Shared **auth**, location, matching, pricing, payment, and notifications. Separate trip and delivery rules.
+A production-ready, scalable architecture for **rides** and **package delivery** on a unified platform. The system leverages shared capabilities (Auth, Location, Matching, Pricing, Payment, Notifications) while strictly isolating the specific business rules for trips and deliveries.
 
-Reference product: **MobilityFlow**.
+**Reference Product:** MobilityFlow
 
 ---
 
 ## Table of Contents
 
-1. [Introduction](#1-introduction)
-2. [Business Requirements](#2-business-requirements)
-3. [Functional Requirements](#3-functional-requirements)
-4. [Non-Functional Requirements](#4-non-functional-requirements)
-5. [Domain Analysis (DDD)](#5-domain-analysis-ddd)
-6. [High-Level Architecture](#6-high-level-architecture)
-7. [Core Components / Services](#7-core-components--services)
-8. [Database Design](#8-database-design)
-9. [API Design](#9-api-design)
-10. [Communication Patterns](#10-communication-patterns)
-11. [Scalability Strategy](#11-scalability-strategy)
-12. [Performance Considerations](#12-performance-considerations)
-13. [Security Considerations](#13-security-considerations)
-14. [Reliability & Fault Tolerance](#14-reliability--fault-tolerance)
-15. [Deployment Strategy](#15-deployment-strategy)
-16. [Monitoring & Observability](#16-monitoring--observability)
-17. [Trade-offs & Design Decisions](#17-trade-offs--design-decisions)
-18. [Future Improvements](#18-future-improvements)
-19. [Conclusion](#19-conclusion)
+1. [Introduction & Vision](#1-introduction--vision)
+2. [Core Design Principles](#2-core-design-principles)
+3. [System Context & Scope](#3-system-context--scope)
+4. [High-Level Architecture](#4-high-level-architecture)
+5. [Unified Identity & Access Management](#5-unified-identity--access-management)
+6. [The Core Job Lifecycle](#6-the-core-job-lifecycle)
+7. [Deployment & Scaling Strategy](#7-deployment--scaling-strategy)
+8. [Design Decision Records (ADR)](#8-design-decision-records-adr)
+9. [Document Conventions & Roadmap](#9-document-conventions--roadmap)
 
 ---
 
-# 1. Introduction
+## 1. Introduction & Vision
 
-## What we are building
+### What we are building
 
-MobilityFlow is a two-sided marketplace:
+MobilityFlow is a two-sided marketplace connecting users with drivers:
 
-- **Mobility** — passenger ride-hailing
-- **Delivery** — package courier
-- **Shared platform** — **auth (all user types)**, location, matching, pricing, payment, notification
+* **Mobility:** Passenger ride-hailing.
+* **Delivery:** Package courier services.
+* **Shared Platform:** Centralized services for Auth, Location, Matching, Pricing, Payment, and Notifications.
 
-Ride-hailing is the core MVP. Courier is in the same MVP because both products use the same drivers and the same dispatch pipeline. We are **not** building food delivery, grocery, freight, or the rest of the Uber catalog.
-
-**One sentence:** one auth for every user; share location, matching, and pay; keep Trip and Delivery separate.
+**One-Sentence Summary:** One unified Auth system for all user types; shared location, matching, and payment infrastructure; strictly isolated domain rules for Trips and Deliveries.
 
 ```mermaid
 flowchart LR
@@ -54,12 +49,12 @@ flowchart LR
   end
 
   subgraph Platform["Shared Platform"]
-    Auth["Auth Identity"]
+    Auth["Auth / Identity"]
     Loc["Location"]
     Match["Matching"]
     Price["Pricing"]
     Pay["Payment"]
-    Notify["Notification"]
+    Notify["Notifications"]
   end
 
   subgraph Supply
@@ -84,36 +79,67 @@ flowchart LR
   Match --> Notify
 ```
 
+### Goals
+
+* **Ship a Dual-Sided MVP:** Launch both rides and courier in a single region as a real production system.
+* **Cost-Effective Scale:** Support **5K to 50K users** at launch with a lean footprint (one backend, one Postgres, one Redis, RabbitMQ).
+* **Unified Identity:** One Auth/Identity platform managing passengers, senders, drivers, couriers, and operations.
+* **High Availability:** Never lose an in-progress trip or delivery on app crash.
+* **Future-Proofing:** Scale to millions of users (replicas, then regions) without changing core domain meanings.
+
 ---
 
-## System context
+## 2. Core Design Principles
 
-Clients talk only to the edge. Maps, card processing, and push are outside the platform.
+These three rules govern all architectural decisions to keep the system simple and performant:
+
+```mermaid
+flowchart TB
+  R1["Share the Kernel, Isolate the Domains"]
+  R2["Offload High-Frequency Telemetry"]
+  R3["Asynchronous Side Effects"]
+  R1 --> R2 --> R3
+```
+
+1. **Share the Kernel, Isolate the Domains:**
+   One Auth service, one location index, one matching pipeline. User signup never happens inside the Mobility or Delivery domains. We avoid a single monolithic `Job` table that mixes passenger rules with proof-of-delivery logic.
+2. **Offload High-Frequency Telemetry:**
+   Driver GPS pings (every 4–5 seconds) are written to an in-memory spatial index (Redis/H3), not directly to the relational database. Postgres only receives location snapshots upon job completion.
+3. **Asynchronous Side Effects:**
+   Non-critical actions (push notifications, receipt generation, payment capture) are offloaded to background workers. This ensures the main transaction state transitions remain fast and low-latency.
+
+---
+
+## 3. System Context & Scope
+
+### System Context
+
+Clients communicate exclusively with the edge. Maps, card processing, and push notifications are external dependencies.
 
 ```mermaid
 flowchart TB
   subgraph Clients
     CApp["Consumer App"]
-    DApp["Driver Courier App"]
+    DApp["Driver / Courier App"]
     Ops["Operations"]
   end
 
-  subgraph Edge["Edge"]
-    REST["API Gateway JWT"]
-    WS["WebSocket Gateway JWT"]
+  subgraph Edge["Edge & Ingestion"]
+    REST["API Gateway — JWT"]
+    WS["WebSocket Gateway — JWT"]
   end
 
   subgraph Core["MobilityFlow"]
-    Auth["Auth Identity"]
+    Auth["Auth / Identity"]
     Mobility["Mobility Domain"]
     DeliveryDom["Delivery Domain"]
     Shared["Shared Platform"]
   end
 
-  subgraph External["External"]
-    Maps["Maps"]
+  subgraph External["External Dependencies"]
+    Maps["Maps Provider"]
     Pay["Payment Provider"]
-    Push["Push SMS Email"]
+    Push["Messaging Provider"]
     KYC["Verification Vendor"]
   end
 
@@ -136,36 +162,47 @@ flowchart TB
   Shared --> Push
 ```
 
-| Who | Talks to the platform to |
-|-----|--------------------------|
-| Consumer App | Register, verify phone, request a ride or delivery, track, pay, rate |
-| Driver / Courier App | Register, complete driver verification, go online, stream GPS, accept offers |
-| Operations | Register or invite, disputes, safety, approval exceptions |
-| Auth / Identity | Signup, OTP, login, JWT, roles, driver KYC status |
-| Maps | Distance, ETA, routes |
-| Payment Provider | Authorize and capture (we never store raw cards) |
-| Push / SMS / Email | OTP, offers, status, receipts |
-| Verification Vendor | License, background check, vehicle check for drivers |
+| Actor | Interaction with Platform |
+| :--- | :--- |
+| **Consumer App** | Register, verify phone, request job, track live, pay, rate. |
+| **Driver / Courier App** | Register, complete KYC, go online, stream GPS, accept offers. |
+| **Operations (Admin)** | Manage disputes, safety issues, manual KYC approvals. |
+| **Maps Provider** | Distance calculation, ETA, routing. |
+| **Payment Provider** | Authorize and capture funds (we never store raw card data). |
+| **Messaging Provider** | OTP, push notifications, SMS, emails. |
+| **Verification Vendor** | Background checks, license verification for drivers. |
+
+### Scope & Out of Scope
+
+| Area | Owned by Platform | Out of Scope |
+| :--- | :--- | :--- |
+| **Auth / Identity** | Register, OTP, login, JWT, role management, driver KYC. | Mobile UI implementation. |
+| **Location** | Driver GPS spatial index, pickup/drop geocoding. | Building proprietary maps. |
+| **Matching** | Nearby supply query, offer locks, re-match logic. | Scheduled rides, pool rides. |
+| **Pricing & Payment** | Fare calculation, authorize/capture/refund via provider. | Building a custom payment gateway. |
+| **Mobility Domain** | Trip lifecycle, ride-specific rules, ratings. | Food delivery, grocery, freight, transit. |
+| **Delivery Domain** | Package lifecycle, proof of delivery (PIN/Photo), ratings. | Multi-region active-active (Reserved for Stage 3). |
 
 ---
 
-## Architecture in four layers
+## 4. High-Level Architecture
 
-Keep this picture in your head. Everything else is a walk through these layers.
+The system is divided into four distinct logical layers:
 
 ```mermaid
 flowchart TB
-  subgraph L1["1. Edge and Ingestion"]
+  subgraph L1["1. Edge & Ingestion"]
     GW["API Gateway"]
     WSG["WebSocket Gateway"]
   end
 
   subgraph L2["2. Shared Platform"]
-    Auth["Auth Identity"]
+    Auth["Auth / Identity"]
     Loc["Location Service"]
     ME["Matching Engine"]
-    PP["Pricing and Payment"]
-    Ntf["Notification"]
+    Price["Pricing Service"]
+    PaySvc["Payment Service"]
+    Ntf["Notifications"]
   end
 
   subgraph L3["3. Product Domains"]
@@ -173,10 +210,10 @@ flowchart TB
     Del["Delivery Domain"]
   end
 
-  subgraph L4["4. Data and Messaging"]
-    PG["PostgreSQL"]
-    RD["Redis"]
-    MQ["Message Broker"]
+  subgraph L4["4. Data & Messaging"]
+    PG["PostgreSQL — System of Record"]
+    RD["Redis — Hot Spatial Data"]
+    MQ["RabbitMQ — Async Domain Events"]
   end
 
   GW --> Auth
@@ -184,7 +221,8 @@ flowchart TB
   Auth --> GW
   GW --> Mob
   GW --> Del
-  GW --> PP
+  GW --> Price
+  GW --> PaySvc
   WSG --> Loc
   Loc --> ME
   ME --> Mob
@@ -200,62 +238,24 @@ flowchart TB
   MQ --> Ntf
 ```
 
-| Layer | Components | What it does |
-|-------|------------|----------------|
-| Edge and ingestion | API Gateway, WebSocket Gateway | Validate JWT, route REST, keep driver WebSocket sessions |
-| Shared platform | **Auth / Identity**, Location, Matching, Pricing and Payment, Notification | Register and verify every user type, issue JWT, driver spatial index, dispatch, pay |
-| Product domains | Mobility, Delivery | Product rules: passenger trips vs packages with proof of delivery |
-| Data and messaging | PostgreSQL, Redis, RabbitMQ (Kafka later) | Postgres = system of record. Redis = hot supply. RabbitMQ = async events at launch |
+| Layer | Components | Responsibility |
+| :--- | :--- | :--- |
+| **1. Edge & Ingestion** | API Gateway, WebSocket Gateway | JWT validation, REST routing, persistent WebSocket sessions for live tracking. |
+| **2. Shared Platform** | Auth, Location, Matching, Pricing, Payment, Notifications | Cross-cutting enterprise capabilities used by both product domains. |
+| **3. Product Domains** | Mobility, Delivery | Specific business logic (e.g., passenger trip states vs. package proof-of-delivery). |
+| **4. Data & Messaging** | PostgreSQL, Redis, RabbitMQ | Postgres (System of Record), Redis (Hot spatial data), RabbitMQ (Async domain events). |
 
-No product API runs until Auth has issued a JWT and the gateway has checked it. REST is for requests the user is waiting on. WebSockets are for GPS and live tracking. The broker is for work that can wait (OTP send, push, receipts, payment capture).
-
----
-
-## MVP — what ships
-
-```mermaid
-flowchart TB
-  subgraph SharedMVP["Shared Platform"]
-    S0["Auth Identity"]
-    S1["Registration all user types"]
-    S2["Verification OTP and driver KYC"]
-    S3["Login JWT roles"]
-    S4["Location index"]
-    S5["Matching engine"]
-    S6["Pricing and payment"]
-    S7["Notification"]
-  end
-
-  subgraph MobilityMVP["Mobility"]
-    M1["Ride request and matching"]
-    M2["Trip lifecycle"]
-    M3["Fare payment rating"]
-  end
-
-  subgraph DeliveryMVP["Delivery"]
-    D1["Package pickup destination"]
-    D2["Delivery request and matching"]
-    D3["Tracking proof of delivery"]
-  end
-
-  S0 --> S1
-  S1 --> S2
-  S2 --> S3
-  SharedMVP --- MobilityMVP
-  SharedMVP --- DeliveryMVP
-```
-
-Not in MVP: food delivery, grocery, freight, transit, shared rides, scheduled rides, multi-region active-active.
+No product API runs until Auth has issued a JWT and the gateway has validated it. REST handles user-facing requests; WebSockets carry GPS and live tracking; RabbitMQ handles work that can wait (OTP, push, receipts, payment capture).
 
 ---
 
-## Auth platform — every user type
+## 5. Unified Identity & Access Management
 
-Registration and verification live on the **Shared Platform**, not inside Mobility or Delivery. One Identity service. Many roles.
+Registration and verification live on the **Shared Platform**, not inside the product domains. The Auth service manages **one user** with **multiple roles**.
 
 ```mermaid
 flowchart TB
-  subgraph Users["All user types"]
+  subgraph Users["All User Types"]
     P["Passenger"]
     S["Sender"]
     D["Driver"]
@@ -263,12 +263,12 @@ flowchart TB
     O["Operations"]
   end
 
-  subgraph AuthPlat["Shared Auth Identity"]
+  subgraph AuthPlat["Shared Auth / Identity"]
     Reg["Register"]
     Ver["Verify"]
     Login["Login"]
     JWT["Issue JWT"]
-    Roles["Assign roles"]
+    Roles["Assign Roles"]
   end
 
   P --> Reg
@@ -282,33 +282,35 @@ flowchart TB
   JWT --> Roles
 ```
 
-| User type | App | Registration | Verification before they can act |
-|-----------|-----|--------------|----------------------------------|
-| Passenger | Consumer App | Phone, name, payment method token | Phone OTP |
-| Sender | Consumer App | Same account can add sender profile | Phone OTP |
-| Driver | Driver App | Phone, name, license, vehicle | Phone OTP + license + background + vehicle check |
-| Courier | Driver App | Same driver account; courier capability | Same as driver; vehicle must match parcel rules |
-| Operations | Admin | Invite by existing admin | Email or SSO + MFA |
+| User Type | App | Registration Requirements | Verification to Act |
+| :--- | :--- | :--- | :--- |
+| **Passenger** | Consumer | Phone, Name, Payment Token | Phone OTP |
+| **Sender** | Consumer | Same account as Passenger | Phone OTP |
+| **Driver** | Driver | Phone, Name, License, Vehicle | Phone OTP + License + Background + Vehicle Check |
+| **Courier** | Driver | Same account as Driver | Same as Driver; vehicle must match parcel rules |
+| **Operations** | Admin | Invite by existing admin | Email/SSO + MFA |
 
-Same person can hold more than one role (passenger and sender is normal; driver and courier is normal). Auth stores **one user**, many **roles**. Product domains only see “is this token allowed to request a ride / go online / approve KYC?”
+Same person can hold multiple roles (passenger + sender, or driver + courier). Auth stores **one user**, many **roles**.
+
+*Note: Product domains only query Auth to verify: "Is this JWT allowed to request a ride / go online / approve KYC?"*
 
 ```mermaid
 sequenceDiagram
   participant App as Any App
   participant GW as API Gateway
-  participant Auth as Auth Identity
-  participant SMS as SMS Email
+  participant Auth as Auth / Identity
+  participant SMS as Messaging Provider
   participant KYC as Verification Vendor
   participant DB as PostgreSQL
 
   App->>GW: Register phone and role
   GW->>Auth: Create user
-  Auth->>DB: Save user pending verify
+  Auth->>DB: Save user (pending verify)
   Auth->>SMS: Send OTP
   App->>GW: Submit OTP
   GW->>Auth: Confirm OTP
   alt Driver or Courier
-    Auth->>KYC: License background vehicle
+    Auth->>KYC: License, background, vehicle check
     KYC-->>Auth: Approved or rejected
     Auth->>DB: Save KYC status
   end
@@ -318,99 +320,88 @@ sequenceDiagram
   Auth-->>App: JWT with roles
 ```
 
-After login, every call is the same:
+After login, every API call follows the same path:
 
 ```mermaid
 flowchart LR
   App["Any App"] --> GW["Gateway"]
   GW --> Auth["Validate JWT"]
-  Auth --> Role{"Role on token"}
-  Role -->|"Passenger Sender"| Product["Mobility or Delivery APIs"]
-  Role -->|"Driver Courier"| Supply["Go online GPS offers"]
+  Auth --> Role{"Role on Token"}
+  Role -->|"Passenger / Sender"| Product["Mobility or Delivery APIs"]
+  Role -->|"Driver / Courier"| Supply["Go online, GPS, offers"]
   Role -->|"Operations"| Admin["Admin APIs"]
 ```
 
-| Auth state | Meaning |
-|------------|---------|
-| Registered | Account exists, OTP not done |
-| Verified | Consumer may request rides or deliveries |
-| KYC pending | Driver or courier cannot go online yet |
-| KYC approved | Driver or courier may go online and receive offers |
-| Suspended | Token rejected at the gateway |
-
-Drivers are **not** verified inside the Mobility domain. Mobility and Delivery only check: this JWT is a driver, and Auth says KYC is approved.
+| Auth State | Meaning |
+| :--- | :--- |
+| **Registered** | Account exists; OTP not completed |
+| **Verified** | Consumer may request rides or deliveries |
+| **KYC Pending** | Driver or courier cannot go online |
+| **KYC Approved** | Driver or courier may go online and receive offers |
+| **Suspended** | Token rejected at the gateway |
 
 ---
 
-## How a job actually runs
+## 6. The Core Job Lifecycle
 
-Auth first. Then three pipelines. Same for rides and deliveries. Only completion differs.
+*Note: We use the generic term **"Job"** to refer to either a Ride or a Delivery. The pipeline is identical until the completion phase.*
 
 ```mermaid
 flowchart LR
-  P0["0. Register verify login"] --> P1["1. Location stream"]
-  P1 --> P2["2. Matching"]
-  P2 --> P3["3. Track and complete"]
+  P0["0. Register / Verify / Login"] --> P1["1. Location Telemetry"]
+  P1 --> P2["2. Low-Latency Matching"]
+  P2 --> P3["3. Live Tracking & Completion"]
 ```
 
-### 1. Location telemetry
+### Phase 1: Location Telemetry (Write Path)
 
-Drivers send GPS every 4–5 seconds. That traffic never hits PostgreSQL on the write path.
+Drivers stream GPS data every 4–5 seconds. This traffic bypasses PostgreSQL to prevent write bottlenecks.
 
 ```mermaid
 flowchart LR
   App["Driver App"] --> WS["WebSocket Gateway"]
   WS --> Loc["Location Service"]
-  Loc --> Redis["Redis H3 spatial index"]
-
+  Loc --> Redis["Redis H3 Spatial Index"]
   Loc -.->|"not on this path"| PG["PostgreSQL"]
 ```
 
-| Step | What happens |
-|------|----------------|
-| Stream | Driver App sends GPS over the WebSocket Gateway |
-| Validate | Location Service checks coordinates |
-| Index | Write to Redis geospatial index (H3) for fast nearby lookup |
-| Skip SQL | High-frequency pings stay in memory. Postgres is not on this write path |
+1. **Stream:** Driver App sends GPS coordinates over the WebSocket Gateway.
+2. **Validate:** Location Service verifies coordinate bounds.
+3. **Index:** Data is written to a Redis Geospatial Index (using H3) for fast nearby lookups.
+4. **Skip SQL:** High-frequency pings stay in memory. Postgres only receives a snapshot when the job completes.
 
-Postgres gets location only as a snapshot when a job completes, or in a later batch. That keeps GPS from becoming a database bottleneck.
-
-### 2. Low-latency matching
-
-A passenger or sender requests a job over HTTP. Matching uses Redis, not a SQL scan of every driver.
+### Phase 2: Low-Latency Matching
 
 ```mermaid
 sequenceDiagram
   participant C as Consumer App
   participant API as API Gateway
-  participant Price as Pricing
+  participant Price as Pricing Service
   participant Match as Matching Engine
   participant Redis as Redis
   participant D as Driver App
   participant Dom as Mobility or Delivery
 
   C->>API: Submit ride or delivery request
-  API->>Price: Quote distance ETA job type
+  API->>Price: Quote (distance, ETA, job type)
   Price-->>API: Fare or delivery fee
   API->>Match: Find nearby eligible drivers
   Match->>Redis: Radius query by capability
   Redis-->>Match: Candidate drivers
-  Match->>Redis: 15 second exclusive offer lock
+  Match->>Redis: 15-second exclusive offer lock
   Match->>D: Push offer over WebSocket
   D->>Match: First accept wins
   Match->>Dom: Update Trip or Delivery state
-  Match->>Match: Emit JobMatched
+  Match->>Match: Emit JobMatched event
 ```
 
-| Step | What happens |
-|------|----------------|
-| Trigger | Passenger or sender submits a request over REST |
-| Price | Deterministic quote from distance, ETA, and job-type coefficients |
-| Spatial query | Matching Engine queries Redis for nearby drivers filtered by capability (car, van, courier) |
-| Offer | Exclusive offer over WebSocket, 15-second lock in Redis |
-| Accept | First accept wins the lock, domain state updates, `JobMatched` is emitted |
+1. **Trigger:** User submits a request via REST API.
+2. **Price:** Pricing Service calculates a deterministic quote (Distance + ETA + Job-Type Coefficients).
+3. **Spatial Query:** Matching Engine queries Redis for nearby drivers, filtered by capability (car, van, courier).
+4. **Offer & Lock:** An exclusive offer is sent via WebSocket. A **15-second lock** is placed in Redis.
+5. **Accept:** The first driver to accept wins the lock. Domain state updates, and a `JobMatched` event is emitted to RabbitMQ.
 
-Rides and deliveries use this same engine. Eligibility and completion rules stay in the product domain.
+Rides and deliveries share the matching engine. Eligibility and completion rules stay in the product domain.
 
 ```mermaid
 flowchart TB
@@ -421,57 +412,50 @@ flowchart TB
 ```
 
 | | Ride | Courier |
-|---|------|---------|
-| Customer | Passenger | Sender |
-| Provider | Driver | Driver / courier |
-| Goal | Move a person | Move a package |
-| Vehicle filter | Car, bike, ... | Bike, car, van, ... |
-| Tracking key | Trip ID | Delivery ID |
-| Done when | Passenger drop-off | Proof of delivery |
+| :--- | :--- | :--- |
+| **Customer** | Passenger | Sender |
+| **Provider** | Driver | Driver / Courier |
+| **Goal** | Move a person | Move a package |
+| **Vehicle filter** | Car, bike, … | Bike, car, van, … |
+| **Tracking key** | Trip ID | Delivery ID |
+| **Done when** | Passenger drop-off | Proof of delivery |
 
-Do **not** put both products in one `Job` table. Share the index and the offer pipeline. Keep Trip and Delivery as separate records.
-
-### 3. Live tracking and completion
-
-While the job is in progress, GPS is forwarded to the consumer over a WebSocket channel keyed by Trip ID or Delivery ID.
+### Phase 3: Live Tracking & Completion
 
 ```mermaid
 flowchart TB
   DApp["Driver GPS"] --> WS["WebSocket Gateway"]
   WS --> Loc["Location Service"]
   Loc --> Redis["Redis"]
-  Loc --> Chan["Live channel by TripID or DeliveryID"]
-  Chan --> CApp["Passenger or Recipient App"]
+  Loc --> Chan["Live channel by Job ID"]
+  Chan --> CApp["Consumer App"]
 
   DApp --> Done{"Completion"}
   Done -->|"Mobility"| Drop["Driver marks drop-off"]
-  Done -->|"Delivery"| PoD["PIN photo or signature"]
+  Done -->|"Delivery"| PoD["PIN, photo, or signature"]
   Drop --> Event["Completed event"]
   PoD --> Event
-  Event --> Workers["Async workers"]
+  Event --> Workers["Async workers via RabbitMQ"]
   Workers --> Pay["Capture payment"]
-  Workers --> Rcpt["Receipt"]
-  Workers --> Pool["Release driver to available pool"]
+  Workers --> Rcpt["Send receipt"]
+  Workers --> Pool["Return driver to available pool"]
 ```
 
-| Step | What happens |
-|------|----------------|
-| Live broadcast | In-transit GPS goes to the consumer on a channel keyed by Trip ID or Delivery ID |
-| Mobility complete | Driver marks drop-off at the destination |
-| Delivery complete | Driver uploads proof of delivery (PIN, photo, or signature) |
-| After | Background workers capture the pre-authorized payment, send the receipt, and put the driver back in the available pool |
+1. **Broadcast:** In-transit GPS is forwarded to the Consumer App on a WebSocket channel keyed by Job ID.
+2. **Completion:**
+   * *Mobility:* Driver marks drop-off at the destination.
+   * *Delivery:* Driver uploads Proof of Delivery (PIN, photo, or signature).
+3. **Post-Job Async:** Background workers capture the pre-authorized payment, send the receipt, and return the driver to the available pool.
 
-Notifications, receipts, and payment capture are async. Core state change (matched, picked up, completed) stays on the request path, targeting **under 100ms**.
+Core state transitions (matched, picked up, completed) stay on the request path, targeting **under 100ms**. Notifications, receipts, and payment capture are async.
 
----
+### Domain State — Two Products, Two State Machines
 
-## Domain state — two products, two machines
-
-Shared matching. Separate aggregates and completion rules.
+Shared matching pipeline. Separate aggregates and completion rules.
 
 ```mermaid
 flowchart LR
-  subgraph Mobility["Mobility aggregate: Trip"]
+  subgraph Mobility["Mobility Aggregate: Trip"]
     T1["Requested"] --> T2["Matched"]
     T2 --> T3["Arriving"]
     T3 --> T4["In Transit"]
@@ -481,7 +465,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  subgraph Delivery["Delivery aggregate: Delivery"]
+  subgraph Delivery["Delivery Aggregate: Delivery"]
     D1["Requested"] --> D2["Matched"]
     D2 --> D3["Pickup En Route"]
     D3 --> D4["Picked Up"]
@@ -490,54 +474,37 @@ flowchart LR
   end
 ```
 
-| Domain | Core record | Lifecycle | Done when |
-|--------|-------------|-----------|-----------|
-| Mobility | Trip | Requested → Matched → Arriving → In Transit → Completed | Passenger drop-off confirmed |
-| Delivery | Delivery | Requested → Matched → Pickup En Route → Picked Up → In Transit → Completed | Proof-of-delivery artifact validated |
+| Domain | Core Record | Lifecycle | Done When |
+| :--- | :--- | :--- | :--- |
+| **Mobility** | Trip | Requested → Matched → Arriving → In Transit → Completed | Passenger drop-off confirmed |
+| **Delivery** | Delivery | Requested → Matched → Pickup En Route → Picked Up → In Transit → Completed | Proof-of-delivery artifact validated |
 
 ---
 
-## Three rules that keep this simple
+## 7. Deployment & Scaling Strategy
+
+**Stage 1 Target:** 5K to 50K users. Keep the cloud bill small and operations simple. One region, one backend, one database.
 
 ```mermaid
 flowchart TB
-  R0["One Auth for every user type"]
-  R1["Share location and matching"]
-  R2["Keep Trip and Delivery separate"]
-  R3["GPS in Redis, facts in Postgres"]
-  R4["Slow work on the broker"]
-```
-
-1. **Share the kernel, isolate the records.** One Auth, one location index, one matching pipeline. No signup inside Mobility or Delivery. No single `Job` table that mixes passenger rules with proof of delivery.
-2. **Offload telemetry.** GPS stays in Redis. Write to Postgres on job completion (and optional later snapshots).
-3. **Async the side effects.** Push, receipts, and payment capture run on workers so the state transition stays fast.
-
----
-
-## How it is deployed at launch
-
-**Stage 1 target: 5K users, headroom to 50K. Keep the bill small.** One region. One backend. One database. No Kafka, no Redis cluster, no Kubernetes farm.
-
-```mermaid
-flowchart TB
-  subgraph Cheap["Stage 1 low cost"]
-    LB["Load Balancer"] --> App["One backend two instances"]
-    App --> PG["One PostgreSQL"]
-    App --> Redis["One Redis"]
-    App --> MQ["One RabbitMQ"]
+  subgraph Stage1["Stage 1 — Launch (5K–50K)"]
+    LB["Load Balancer"] --> App["2 App Instances"]
+    App --> PG["1 PostgreSQL"]
+    App --> Redis["1 Redis"]
+    App --> MQ["1 RabbitMQ"]
   end
 ```
 
-Inside that one backend the modules stay separate in code (Auth, Mobility, Delivery, Location, Matching, Pricing, Payment, Notification). They are **not** separate clusters at launch.
+Inside the backend, modules remain separate in code (Auth, Mobility, Delivery, Location, Matching, Pricing, Payment, Notifications) but deploy as **one unit** at launch — not separate clusters.
 
 ```mermaid
 flowchart TB
-  LB["Load Balancer"] --> App["API plus WebSocket"]
-  subgraph AppBox["Single deployable"]
-    Auth["Auth Identity"]
+  LB["Load Balancer"] --> App["API + WebSocket"]
+  subgraph AppBox["Single Deployable"]
+    Auth["Auth / Identity"]
     Mob["Mobility"]
     Del["Delivery"]
-    Plat["Location Matching Pricing Notify"]
+    Plat["Location · Matching · Pricing · Payment · Notifications"]
   end
   App --> Auth
   App --> Mob
@@ -552,141 +519,76 @@ flowchart TB
   Plat --> MQ["RabbitMQ"]
 ```
 
-| Stage | Users | Cost shape |
-|-------|-------|------------|
-| 1. Launch | **5K to 50K** | 2 app instances, 1 Postgres, 1 Redis, 1 RabbitMQ, pay-as-you-go maps/SMS/payments |
-| 2. Growth | past 50K toward hundreds of thousands | Split hot services, Redis cluster, Postgres replicas, more gateways |
-| 3. Large scale | millions | Regional routing, regional data and matching, sharding |
-
-**Do not buy at Stage 1:** Kafka, Redis Cluster, Kubernetes multi-AZ microservices, read replicas, multi-region, extra matching workers. Split only when 50K concurrent load actually hurts.
-
----
-
-## How many users at a time?
-
-Stage 1 is **5K–50K users**, not millions. Millions of accounts come later without changing Trip or Delivery.
+| Stage | User Scale | Infrastructure Shape |
+| :--- | :--- | :--- |
+| **Stage 1: Launch** | **5K – 50K** | 2 App Instances, 1 Postgres, 1 Redis, 1 RabbitMQ. Pay-as-you-go external APIs. |
+| **Stage 2: Growth** | **50K – 500K** | Split hot services, Redis Cluster, Postgres Read Replicas, multiple API gateways. |
+| **Stage 3: Scale** | **Millions** | Regional routing, regional data/matching silos, database sharding. |
 
 ```mermaid
 flowchart LR
-  S["Start 5K users"] --> M["Stage 1 max 50K"]
-  M --> G["Stage 2 grow"]
-  G --> Mega["Stage 3 millions"]
+  S1["Stage 1: 5K–50K"] --> S2["Stage 2: 50K–500K"]
+  S2 --> S3["Stage 3: Millions"]
 ```
 
-| Metric | Stage 1 — minimise cost | Stage 2 | Stage 3 |
-|--------|-------------------------|---------|---------|
-| Users on the platform | **5K start, design for 50K** | 50K to ~500K | millions |
-| Concurrent (apps open) | about 500 to 5K | tens of thousands | millions, by region |
-| Online drivers GPS | about 200 to 2K | tens of thousands | 100k+ per region |
-| Peak new jobs | tens to a few hundred per minute | thousands per minute | tens of thousands per minute per region |
+| Metric | Stage 1 | Stage 2 | Stage 3 |
+| :--- | :--- | :--- | :--- |
+| **Registered users** | 5K start, design for 50K | 50K – ~500K | Millions |
+| **Concurrent apps open** | ~500 – 5K | Tens of thousands | Millions, by region |
+| **Online drivers (GPS)** | ~200 – 2K | Tens of thousands | 100K+ per region |
+| **Peak new jobs / min** | Tens to a few hundred | Thousands | Tens of thousands per region |
 
-Example: launch with **5K** registered users. Rush hour might be **500–1K** apps open and **200–400** drivers online. At **50K** users, maybe **3K–5K** concurrent. That still fits one Postgres and one Redis.
+**Do not buy at Stage 1:** Kafka, Redis Cluster, Kubernetes multi-AZ microservices, read replicas, multi-region routing. Split only when 50K concurrent load actually hurts.
 
-What we skip to keep cost down:
-
-| Spend later | Why not now |
-|-------------|-------------|
-| Kafka | RabbitMQ is enough for OTP, push, receipts |
-| Redis Cluster | One Redis holds 50K users of GPS and locks |
-| Many microservices | Extra load balancers and idle VMs with no traffic |
-| Postgres replicas | One primary handles 50K-user writes |
-| Multi-region | One city does not need it |
-
-What breaks first **after** 50K (then spend):
-
-| Bottleneck | Why |
-|------------|-----|
-| WebSocket instances | More online drivers pinging every 4–5 seconds |
+| Bottleneck (post-50K) | Why It Breaks |
+| :--- | :--- |
+| WebSocket instances | More drivers pinging every 4–5 seconds |
 | Redis memory / CPU | Spatial index and offer locks |
 | Postgres connections | Auth, trips, payments |
-| Single-region | Second city in another timezone |
-
-Path:
-
-```mermaid
-flowchart TB
-  S1["Stage 1: 5K to 50K cheap stack"] --> S2["Stage 2: split and replicate"]
-  S2 --> S3["Stage 3: regions for millions"]
-```
-
-Section 11 will detail the later spend. The domain (Trip, Delivery, Auth roles) does not change.
+| Single region | Second city in another timezone |
 
 ---
 
-## Goals
+## 8. Design Decision Records (ADR)
 
-- Ship rides **and** courier in one region, as a real production system
-- Start at **5K users**, stay cheap through **50K** (one backend, one Postgres, one Redis, RabbitMQ)
-- One **Auth / Identity** platform for passenger, sender, driver, courier, and operations
-- Reuse location, matching, pricing, payment, and notification
-- Keep Trip and Delivery rules separate
-- Match nearby eligible drivers quickly
-- Never lose an in-progress trip or delivery on app crash
-- Complete rides on drop-off; complete deliveries on proof of delivery
-- Pay without storing raw card data
-- Scale later (replicas, then regions) without changing the domain meanings
+When documenting specific architectural choices in future sections, we use the following format:
 
----
+* **Problem:** What is the bottleneck or pain point?
+* **MVP Solution:** What are we shipping right now?
+* **Why:** Why is this sufficient for the current stage?
+* **Scaling Problem:** What will break when we grow?
+* **Evolution:** What is the next architectural iteration?
+* **Trade-off:** What do we gain, and what becomes harder?
 
-## Intended audience
+*Example:*
 
-Software engineers, tech leads, architects, and engineering managers on this team. Use this for design reviews and onboarding — not as an interview cheat sheet.
-
----
-
-## Scope
-
-| Area | Owns |
-|------|------|
-| Auth / Identity | Register, OTP, login, JWT, roles for passenger, sender, driver, courier, ops; driver KYC |
-| Location | Driver GPS index, pickup and drop points |
-| Matching | Nearby supply, offers, locks, re-match |
-| Pricing | Ride fare and delivery fee |
-| Payment | Authorize, capture, refund via the provider |
-| Notification | Push, SMS, email from domain events |
-| Mobility | Ride request, Trip, fare, rating (no user signup here) |
-| Delivery | Package, Delivery, proof of delivery, rating (no user signup here) |
+> **Problem:** Writing GPS every 4 seconds will crush Postgres.
+> **MVP Solution:** Use Redis H3 for live location.
+> **Why:** Launch traffic doesn't require historical GPS on the hot path.
+> **Scaling Problem:** Redis memory pressure at 100K+ concurrent drivers.
+> **Evolution:** Batch GPS snapshots to Postgres; regional Redis silos.
+> **Trade-off:** Extremely fast matching, but weaker historical GPS tracking until we implement batch snapshots.
 
 ---
 
-## Out of scope
+## 9. Document Conventions & Roadmap
 
-- Mobile UI implementation
-- Food delivery, grocery, freight, transit, pool rides, scheduled rides
-- Building our own maps or card processor
-- Multi-region active-active (Stage 3)
-- Cloud vendor runbooks and CI/CD internals
+* **Terminology:** **MobilityFlow** = the product. **Platform** = shared capabilities. **Mobility / Delivery** = specific product domains.
+* **Staging:** Stage 1 is the default baseline. Stages 2 and 3 are discussed only when addressing scale.
+* **Diagrams vs Tables:** Diagrams are the source of truth for flows. Tables hold the business rules.
 
----
+### Upcoming Sections (Roadmap)
 
-## How we record decisions
+*The following sections will be expanded in subsequent updates:*
 
-| Step | Meaning |
-|------|---------|
-| Problem | What hurts |
-| MVP solution | What we ship now |
-| Why | Why that is enough now |
-| Scaling problem | What breaks later |
-| Evolution | Next architecture, same domain |
-| Trade-off | What we gain and what gets harder |
-
-Example:
-
-- **Problem:** GPS every few seconds would crush Postgres.
-- **MVP:** Redis H3 for live location.
-- **Why:** Launch traffic does not need a GPS history database on the hot path.
-- **Later:** Snapshots and regional indexes.
-- **Trade-off:** Fast matching; weaker historical GPS until we add snapshots.
+| # | Section |
+| :--- | :--- |
+| 10 | Database Schema Design (ERD) |
+| 11 | API Contracts (REST & WebSockets) |
+| 12 | Scalability & Performance Deep-Dive |
+| 13 | Security & Fault Tolerance |
+| 14 | Monitoring, Observability & CI/CD |
 
 ---
 
-## Document conventions
-
-- **MobilityFlow** = the product. **Platform** = shared capabilities. **Mobility** / **Delivery** = product domains (not automatically separate deployables).
-- Stage 1 is the default. Stages 2 and 3 appear when a section talks about growth.
-- Diagrams are the source of truth for flows. Tables hold the rules.
-- Section 5 will deepen Trip vs Delivery. Section 11 will deepen scale.
-
----
-
-<!-- Sections 2–19 will be added after review of Section 1. -->
+<!-- Sections 10–14 follow the ADD template and will be added after review of Sections 1–9. -->
